@@ -1,5 +1,4 @@
 import discord
-from discord.ext import commands
 import os
 import sqlite3
 import google.generativeai as genai
@@ -10,14 +9,14 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GENAI_API_KEY = os.getenv("GENAI_API_KEY")
 
 genai.configure(api_key=GENAI_API_KEY)
-# Using the 2026 Stable Flash-Lite model
 model = genai.GenerativeModel('gemini-2.5-flash-lite')
 
+# Standard intents for reading messages
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+client = discord.Client(intents=intents)
 
-# --- DATABASE SETUP ---
+# --- DATABASE FUNCTIONS ---
 def init_db():
     conn = sqlite3.connect('freebot_memory.db')
     cursor = conn.cursor()
@@ -36,8 +35,7 @@ init_db()
 def save_fact(user_id, fact):
     conn = sqlite3.connect('freebot_memory.db')
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO memories VALUES (?, ?, ?)', 
-                   (str(user_id), fact, datetime.now()))
+    cursor.execute('INSERT INTO memories VALUES (?, ?, ?)', (str(user_id), fact, datetime.now()))
     conn.commit()
     conn.close()
 
@@ -49,75 +47,72 @@ def get_memories(user_id):
     conn.close()
     return [f[0] for f in facts]
 
-# --- BOT COMMANDS ---
-
-@bot.event
-async def on_ready():
-    print(f'Freebot is live and remembering as {bot.user}')
-
-@bot.command()
-async def remember(ctx, *, arg):
-    save_fact(ctx.author.id, arg)
-    await ctx.send(f"✅ Fact stored in my lite-DB: {arg}")
-
-@bot.command()
-async def forget(ctx, *, arg):
+def delete_memory(user_id, keyword):
     conn = sqlite3.connect('freebot_memory.db')
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM memories WHERE user_id = ? AND fact LIKE ?', 
-                   (str(ctx.author.id), f'%{arg}%'))
+    cursor.execute('DELETE FROM memories WHERE user_id = ? AND fact LIKE ?', (str(user_id), f'%{keyword}%'))
     conn.commit()
     conn.close()
-    await ctx.send(f"🗑️ Memory deleted: {arg}")
 
-@bot.command()
-async def brain(ctx):
-    facts = get_memories(ctx.author.id)
-    if not facts:
-        await ctx.send("I don't have any saved facts about you yet.")
-    else:
-        memory_list = "\n".join([f"- {f}" for f in facts])
-        await ctx.send(f"**My internal records for you:**\n{memory_list}")
+# --- BOT EVENTS ---
 
-# --- MAIN CHAT LOGIC ---
+@client.event
+async def on_ready():
+    print(f'Freebot is online without prefixes as {client.user}')
 
-@bot.event
+@client.event
 async def on_message(message):
-    if message.author == bot.user:
+    if message.author == client.user:
         return
 
-    if message.content.startswith('!'):
-        await bot.process_commands(message)
+    content = message.content.lower()
+
+    # 1. NATURAL TRIGGER: REMEMBER
+    if content.startswith("remember ") or content.startswith("freebot, remember "):
+        fact = message.content.split("emember ", 1)[1]
+        save_fact(message.author.id, fact)
+        await message.channel.send(f"✨ I've added that to my records: {fact}")
         return
 
+    # 2. NATURAL TRIGGER: BRAIN/RECALL
+    if "what do you remember" in content or "check brain" in content:
+        facts = get_memories(message.author.id)
+        if not facts:
+            await message.channel.send("My records are empty for you.")
+        else:
+            memory_list = "\n".join([f"• {f}" for f in facts])
+            await message.channel.send(f"**Here is what I know about you:**\n{memory_list}")
+        return
+
+    # 3. NATURAL TRIGGER: FORGET
+    if content.startswith("forget "):
+        keyword = content.replace("forget ", "")
+        delete_memory(message.author.id, keyword)
+        await message.channel.send(f"🗑️ I've cleared any memories related to: {keyword}")
+        return
+
+    # 4. GENERAL CHAT (With Memory & Multimodal)
     user_memories = get_memories(message.author.id)
-    context = f"Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    context = f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     if user_memories:
-        context += "Past facts about this user:\n" + "\n".join(user_memories)
+        context += "Stored User Facts:\n" + "\n".join(user_memories)
 
     async with message.channel.typing():
         try:
-            content_parts = [f"Context:\n{context}\n\nUser Message: {message.content}"]
+            content_parts = [f"Context:\n{context}\n\nUser: {message.content}"]
             
-            # MULTIMODAL HANDLING
             if message.attachments:
                 for attachment in message.attachments:
                     # Check for Images or Audio
-                    is_image = any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp'])
-                    is_audio = any(attachment.filename.lower().endswith(ext) for ext in ['mp3', 'wav', 'ogg'])
-                    
-                    if is_image or is_audio:
+                    mime = attachment.content_type or ""
+                    if any(x in mime for x in ['image', 'audio']):
                         file_data = await attachment.read()
-                        content_parts.append({'mime_type': attachment.content_type, 'data': file_data})
+                        content_parts.append({'mime_type': mime, 'data': file_data})
                         
-                        # Ask Gemini to describe the file for the DB
-                        desc_prompt = "Briefly describe this file so I can remember it later. Start with 'FILE_DESCRIPTION: '"
-                        desc_resp = model.generate_content([desc_prompt, {'mime_type': attachment.content_type, 'data': file_data}])
-                        
-                        # Save description to SQLite
-                        save_fact(message.author.id, desc_resp.text.replace("FILE_DESCRIPTION: ", ""))
+                        # Auto-describe and save to memory
+                        desc_resp = model.generate_content(["Describe this briefly for my memory DB:", {'mime_type': mime, 'data': file_data}])
+                        save_fact(message.author.id, f"Seen/Heard: {desc_resp.text}")
 
-            # Generate final response
             response = model.generate_content(content_parts)
             text = response.text
             
@@ -127,4 +122,4 @@ async def on_message(message):
         except Exception as e:
             await message.channel.send(f"⚠️ System Error: {e}")
 
-bot.run(TOKEN)
+client.run(TOKEN)        
