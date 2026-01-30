@@ -1,26 +1,27 @@
-# Freebot: Internet-Aware Discord AI Agent
+# Freebot: Internet-Aware AI Agent with Persistence
 
-A production-grade Discord bot powered by the **Gemini 2.5 Flash-Lite** model. Freebot isn't just a chatbot; it's a grounded agent that knows the current time, weather, and live news through Google Search integration.
+Freebot is a production-grade Discord AI agent designed for the **2026 Gemini ecosystem**. It features long-term memory, real-time web grounding, and is hosted 24/7 on Google Cloud.
 
 ## 🚀 Key Features
-* **Always Live:** Managed by `systemd` on a GCP VM for 24/7 uptime.
-* **Web Grounding:** Real-time access to the internet via Google Search tools.
-* **Time Sensitive:** Awareness of current date and time for accurate scheduling and context.
-* **Auto-Splitting:** Handles long AI responses by intelligently chunking messages for Discord.
+* **Long-Term Memory:** Uses SQLite3 to remember user facts (e.g., names, preferences). Use `remember [fact]` to store info and `check brain` to view it.
+* **Live Web Search:** Integrated Google Search tool for real-time news, weather, and data.
+* **Persistent Hosting:** Managed by `systemd` on a GCP VM for 100% uptime.
+* **Multimodal Ready:** Capable of processing text and attachments (images/audio) in a single flow.
 
-## 🛠️ Tech Stack
+## 🛠️ Technical Stack
 * **Language:** Python 3.10+
-* **AI SDK:** `google-genai` (2026 Production Version)
-* **Discord API:** `discord.py`
-* **Deployment:** Google Cloud Platform (VM Instance)
+* **Core SDK:** `google-genai` (Gemini 2.5 Flash-Lite)
+* **Database:** SQLite3 (Local persistence)
+* **Infrastructure:** Google Cloud Platform (Compute Engine)
 
 ## 📂 Project Structure
-* `bot.py`: Core logic and AI tool integration.
-* `.env`: (Hidden) API keys and Discord tokens.
-* `freebot.service`: Linux service configuration for 24/7 operation.
-* `.gitignore`: Prevents sensitive keys from being leaked to GitHub.
+* `bot.py`: Main agent logic and database integration.
+* `freebot_memory.db`: (Local only) SQLite database file.
+* `freebot.service`: Systemd configuration for 24/7 reliability.
+* `.env`: Environment variables (API keys).
 
-## 🤖 Future Roadmap (True Agent Status)
-* **Multi-Model Routing:** Integration with Claude 3.5 for complex logic tasks.
-* **Tool-Use:** Enabling the bot to read uploaded PDFs and CSV files.
-* **Persistent Memory:** Long-term RAG (Retrieval-Augmented Generation) for user-specific history.
+## 🛡️ Usage
+- **Chat:** Just talk to the bot.
+- **Memory:** `remember I am a developer`
+- **Recall:** `check brain`
+- **Reset Memory:** `forget [keyword]`
