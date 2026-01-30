@@ -1,125 +1,125 @@
-import discord
 import os
+import discord
 import sqlite3
-import google.generativeai as genai
-from datetime import datetime
+import datetime
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
 
-# --- CONFIGURATION ---
-TOKEN = os.getenv("DISCORD_TOKEN")
-GENAI_API_KEY = os.getenv("GENAI_API_KEY")
+# 1. SETUP & CREDENTIALS
+load_dotenv()
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-genai.configure(api_key=GENAI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash-lite')
-
-# Standard intents for reading messages
+client_ai = genai.Client(api_key=GEMINI_KEY)
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+discord_client = discord.Client(intents=intents)
 
-# --- DATABASE FUNCTIONS ---
+# 2. DATABASE (MEMORY) LOGIC
 def init_db():
     conn = sqlite3.connect('freebot_memory.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS memories (
-            user_id TEXT,
-            fact TEXT,
-            timestamp DATETIME
-        )
-    ''')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS memories 
+                 (user_id TEXT, fact TEXT, timestamp DATETIME)''')
     conn.commit()
     conn.close()
 
-init_db()
-
 def save_fact(user_id, fact):
     conn = sqlite3.connect('freebot_memory.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT INTO memories VALUES (?, ?, ?)', (str(user_id), fact, datetime.now()))
+    c = conn.cursor()
+    c.execute('INSERT INTO memories VALUES (?, ?, ?)', (str(user_id), fact, datetime.datetime.now()))
     conn.commit()
     conn.close()
 
 def get_memories(user_id):
     conn = sqlite3.connect('freebot_memory.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT fact FROM memories WHERE user_id = ?', (str(user_id),))
-    facts = cursor.fetchall()
+    c = conn.cursor()
+    c.execute('SELECT fact FROM memories WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10', (str(user_id),))
+    facts = [row[0] for row in c.fetchall()]
     conn.close()
-    return [f[0] for f in facts]
+    return facts
 
 def delete_memory(user_id, keyword):
     conn = sqlite3.connect('freebot_memory.db')
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM memories WHERE user_id = ? AND fact LIKE ?', (str(user_id), f'%{keyword}%'))
+    c = conn.cursor()
+    c.execute('DELETE FROM memories WHERE user_id = ? AND fact LIKE ?', (str(user_id), f'%{keyword}%'))
     conn.commit()
     conn.close()
 
-# --- BOT EVENTS ---
+init_db()
 
-@client.event
+# 3. HELPER FUNCTIONS
+def split_message(text, limit=2000):
+    return [text[i:i + limit] for i in range(0, len(text), limit)]
+
+# 4. BOT EVENTS
+@discord_client.event
 async def on_ready():
-    print(f'Freebot is online without prefixes as {client.user}')
+    print(f'✅ Freebot Memory-Agent is online as {discord_client.user}')
 
-@client.event
+@discord_client.event
 async def on_message(message):
-    if message.author == client.user:
+    if message.author == discord_client.user:
         return
 
-    content = message.content.lower()
+    content_lower = message.content.lower()
+    user_id = message.author.id
 
-    # 1. NATURAL TRIGGER: REMEMBER
-    if content.startswith("remember ") or content.startswith("freebot, remember "):
-        fact = message.content.split("emember ", 1)[1]
-        save_fact(message.author.id, fact)
-        await message.channel.send(f"✨ I've added that to my records: {fact}")
-        return
+    # --- COMMAND: REMEMBER ---
+    if content_lower.startswith("remember "):
+        fact = message.content[9:]
+        save_fact(user_id, fact)
+        return await message.reply(f"✨ Memory Stored: {fact}")
 
-    # 2. NATURAL TRIGGER: BRAIN/RECALL
-    if "what do you remember" in content or "check brain" in content:
-        facts = get_memories(message.author.id)
-        if not facts:
-            await message.channel.send("My records are empty for you.")
-        else:
-            memory_list = "\n".join([f"• {f}" for f in facts])
-            await message.channel.send(f"**Here is what I know about you:**\n{memory_list}")
-        return
+    # --- COMMAND: FORGET ---
+    if content_lower.startswith("forget "):
+        keyword = content_lower[7:]
+        delete_memory(user_id, keyword)
+        return await message.reply(f"🗑️ Cleared memories matching: {keyword}")
 
-    # 3. NATURAL TRIGGER: FORGET
-    if content.startswith("forget "):
-        keyword = content.replace("forget ", "")
-        delete_memory(message.author.id, keyword)
-        await message.channel.send(f"🗑️ I've cleared any memories related to: {keyword}")
-        return
-
-    # 4. GENERAL CHAT (With Memory & Multimodal)
-    user_memories = get_memories(message.author.id)
-    context = f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    if user_memories:
-        context += "Stored User Facts:\n" + "\n".join(user_memories)
-
+    # --- GENERAL CHAT WITH AI ---
     async with message.channel.typing():
         try:
-            content_parts = [f"Context:\n{context}\n\nUser: {message.content}"]
+            # Prepare context
+            now = datetime.datetime.now().strftime("%A, %B %d, %Y - %H:%M")
+            user_memories = get_memories(user_id)
+            memory_str = "\n".join([f"- {m}" for m in user_memories])
             
+            # Setup Prompt Parts
+            prompt_parts = [
+                f"SYSTEM: Current Time: {now}. User Memories:\n{memory_str}\n\n"
+                f"User said: {message.content}"
+            ]
+
+            # Handle Attachments (Images/Audio)
             if message.attachments:
                 for attachment in message.attachments:
-                    # Check for Images or Audio
                     mime = attachment.content_type or ""
-                    if any(x in mime for x in ['image', 'audio']):
-                        file_data = await attachment.read()
-                        content_parts.append({'mime_type': mime, 'data': file_data})
-                        
-                        # Auto-describe and save to memory
-                        desc_resp = model.generate_content(["Describe this briefly for my memory DB:", {'mime_type': mime, 'data': file_data}])
-                        save_fact(message.author.id, f"Seen/Heard: {desc_resp.text}")
+                    if any(x in mime for x in ['image', 'audio', 'video', 'pdf']):
+                        file_bytes = await attachment.read()
+                        prompt_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime))
 
-            response = model.generate_content(content_parts)
-            text = response.text
-            
-            for i in range(0, len(text), 2000):
-                await message.channel.send(text[i:i+2000])
-                
+            # AI Generation with Internet Search
+            search_tool = types.Tool(google_search=types.GoogleSearch())
+            response = client_ai.models.generate_content(
+                model='gemini-2.5-flash-lite',
+                contents=prompt_parts,
+                config=types.GenerateContentConfig(
+                    tools=[search_tool],
+                    system_instruction="You are Freebot, an advanced AI Agent. You remember user facts and use Google Search for live info."
+                )
+            )
+
+            # Reply
+            if response.text:
+                for chunk in split_message(response.text):
+                    await message.reply(chunk)
+            else:
+                await message.reply("I processed that but don't have a text response.")
+
         except Exception as e:
-            await message.channel.send(f"⚠️ System Error: {e}")
+            print(f"Error: {e}")
+            await message.reply(f"⚠️ Agent Error: {e}")
 
-client.run(TOKEN)        
+discord_client.run(DISCORD_TOKEN)
