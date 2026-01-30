@@ -6,7 +6,6 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
-# 1. SETUP & CREDENTIALS
 load_dotenv()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -16,12 +15,10 @@ intents = discord.Intents.default()
 intents.message_content = True
 discord_client = discord.Client(intents=intents)
 
-# 2. DATABASE (MEMORY) LOGIC
 def init_db():
     conn = sqlite3.connect('freebot_memory.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS memories 
-                 (user_id TEXT, fact TEXT, timestamp DATETIME)''')
+    c.execute('CREATE TABLE IF NOT EXISTS memories (user_id TEXT, fact TEXT, timestamp DATETIME)')
     conn.commit()
     conn.close()
 
@@ -35,7 +32,7 @@ def save_fact(user_id, fact):
 def get_memories(user_id):
     conn = sqlite3.connect('freebot_memory.db')
     c = conn.cursor()
-    c.execute('SELECT fact FROM memories WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10', (str(user_id),))
+    c.execute('SELECT fact FROM memories WHERE user_id = ? ORDER BY timestamp DESC LIMIT 15', (str(user_id),))
     facts = [row[0] for row in c.fetchall()]
     conn.close()
     return facts
@@ -49,77 +46,68 @@ def delete_memory(user_id, keyword):
 
 init_db()
 
-# 3. HELPER FUNCTIONS
-def split_message(text, limit=2000):
-    return [text[i:i + limit] for i in range(0, len(text), limit)]
-
-# 4. BOT EVENTS
 @discord_client.event
 async def on_ready():
-    print(f'✅ Freebot Memory-Agent is online as {discord_client.user}')
+    print(f'✅ Agent Online: {discord_client.user}')
 
 @discord_client.event
 async def on_message(message):
-    if message.author == discord_client.user:
-        return
-
+    if message.author == discord_client.user: return
     content_lower = message.content.lower()
     user_id = message.author.id
 
-    # --- COMMAND: REMEMBER ---
     if content_lower.startswith("remember "):
         fact = message.content[9:]
         save_fact(user_id, fact)
-        return await message.reply(f"✨ Memory Stored: {fact}")
+        return await message.reply(f"🧠 Memory Locked: {fact}")
 
-    # --- COMMAND: FORGET ---
+    if content_lower == "check brain":
+        facts = get_memories(user_id)
+        if not facts: return await message.reply("My memory of you is empty.")
+        return await message.reply("**What I know about you:**\n" + "\n".join([f"• {f}" for f in facts]))
+
     if content_lower.startswith("forget "):
         keyword = content_lower[7:]
         delete_memory(user_id, keyword)
-        return await message.reply(f"🗑️ Cleared memories matching: {keyword}")
+        return await message.reply(f"🗑️ Erased: {keyword}")
 
-    # --- GENERAL CHAT WITH AI ---
     async with message.channel.typing():
         try:
-            # Prepare context
-            now = datetime.datetime.now().strftime("%A, %B %d, %Y - %H:%M")
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             user_memories = get_memories(user_id)
-            memory_str = "\n".join([f"- {m}" for m in user_memories])
+            memory_context = "\n".join(user_memories) if user_memories else "No previous facts known."
             
-            # Setup Prompt Parts
-            prompt_parts = [
-                f"SYSTEM: Current Time: {now}. User Memories:\n{memory_str}\n\n"
-                f"User said: {message.content}"
-            ]
+            # STRUCTURED PROMPT FOR BETTER RECALL
+            prompt = f"""
+            <system_context>
+            Current Time: {now}
+            User ID: {user_id}
+            Known Facts About This User:
+            {memory_context}
+            </system_context>
 
-            # Handle Attachments (Images/Audio)
-            if message.attachments:
-                for attachment in message.attachments:
-                    mime = attachment.content_type or ""
-                    if any(x in mime for x in ['image', 'audio', 'video', 'pdf']):
-                        file_bytes = await attachment.read()
-                        prompt_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime))
+            <user_request>
+            {message.content}
+            </user_request>
+            
+            INSTRUCTIONS: Use the <system_context> to answer accurately. If the user asks who they are or what their name is, look at the 'Known Facts' above.
+            """
 
-            # AI Generation with Internet Search
             search_tool = types.Tool(google_search=types.GoogleSearch())
             response = client_ai.models.generate_content(
                 model='gemini-2.5-flash-lite',
-                contents=prompt_parts,
+                contents=prompt,
                 config=types.GenerateContentConfig(
                     tools=[search_tool],
-                    system_instruction="You are Freebot, an advanced AI Agent. You remember user facts and use Google Search for live info."
+                    system_instruction="You are Freebot. You are a helpful AI with a perfect memory of the facts the user tells you to remember."
                 )
             )
 
-            # Reply
-            if response.text:
-                for chunk in split_message(response.text):
-                    await message.reply(chunk)
-            else:
-                await message.reply("I processed that but don't have a text response.")
+            text = response.text
+            for i in range(0, len(text), 2000):
+                await message.reply(text[i:i+2000])
 
         except Exception as e:
-            print(f"Error: {e}")
-            await message.reply(f"⚠️ Agent Error: {e}")
+            await message.reply(f"⚠️ Error: {e}")
 
 discord_client.run(DISCORD_TOKEN)
