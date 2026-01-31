@@ -15,7 +15,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 discord_client = discord.Client(intents=intents)
 
-# --- NEW: IDENTITY LOADER ---
 def load_identity():
     try:
         with open('identity.txt', 'r') as f:
@@ -23,7 +22,6 @@ def load_identity():
     except FileNotFoundError:
         return "You are Freebot, a professional assistant for Dr. Fahad Umer."
 
-# --- ORIGINAL DATABASE LOGIC ---
 def init_db():
     conn = sqlite3.connect('freebot_memory.db')
     c = conn.cursor()
@@ -37,7 +35,6 @@ def save_fact(user_id, fact):
     c.execute('INSERT INTO memories VALUES (?, ?, ?)', (str(user_id), fact, datetime.datetime.now()))
     conn.commit()
     conn.close()
-    print(f"💾 DATABASE SAVE SUCCESS: {fact}")
 
 def get_memories(user_id):
     conn = sqlite3.connect('freebot_memory.db')
@@ -51,57 +48,64 @@ init_db()
 
 @discord_client.event
 async def on_ready():
-    print(f'✅ Agent Online: {discord_client.user}')
+    print(f'✅ Multimodal Agent Online: {discord_client.user}')
 
 @discord_client.event
 async def on_message(message):
     if message.author == discord_client.user: return
     
     msg_text = message.content.strip()
-    content_lower = msg_text.lower()
     user_id = str(message.author.id)
 
-    # ORIGINAL TRIGGER: REMEMBER
-    if content_lower.startswith("remember "):
-        fact_to_save = msg_text[9:].strip()
-        save_fact(user_id, fact_to_save)
-        return await message.reply(f"🧠 Memory Locked: **{fact_to_save}**")
+    # Manual Memory Triggers
+    if msg_text.lower().startswith("remember "):
+        fact = msg_text[9:].strip()
+        save_fact(user_id, fact)
+        return await message.reply(f"🧠 Memory Locked: **{fact}**")
 
-    # ORIGINAL TRIGGER: CHECK BRAIN
-    if content_lower == "check brain":
+    if msg_text.lower() == "check brain":
         facts = get_memories(user_id)
-        if not facts: return await message.reply("My memory of you is currently empty.")
-        return await message.reply("**Here is what I know about you:**\n" + "\n".join([f"• {f}" for f in facts]))
+        return await message.reply("**Memory:**\n" + "\n".join([f"• {f}" for f in facts]) if facts else "Memory empty.")
 
     async with message.channel.typing():
         try:
-            # Combined Context
-            identity_context = load_identity()
-            user_memories = get_memories(user_id)
-            memory_context = "\n".join(user_memories) if user_memories else "No personal facts known."
-            
-            prompt = f"""
-            <user_facts>
-            {memory_context}
-            </user_facts>
+            # 1. Gather all content (Text + Attachments)
+            content_parts = []
+            if msg_text:
+                content_parts.append(msg_text)
+            else:
+                content_parts.append("Analyze the attached file.")
 
-            User Message: {message.content}
-            """
+            # 2. Process Attachments (Images/Voice)
+            for attachment in message.attachments:
+                file_path = f"temp_{attachment.filename}"
+                await attachment.save(file_path)
+                
+                with open(file_path, "rb") as f:
+                    file_data = f.read()
+                    mime_type = attachment.content_type
+                    content_parts.append(types.Part.from_bytes(data=file_data, mime_type=mime_type))
+                
+                os.remove(file_path)
 
-            # Maintain Search Tool and System Instruction
-            search_tool = types.Tool(google_search=types.GoogleSearch())
+            # 3. Context & Identity
+            identity = load_identity()
+            memories = "\n".join(get_memories(user_id))
+            system_prompt = f"{identity}\n\nUSER FACTS:\n{memories}\n\nRespond as a professional assistant."
+
+            # 4. Generate with Search enabled
             response = client_ai.models.generate_content(
-                model='gemini-2.0-flash', # Corrected stable version
-                contents=prompt,
+                model='gemini-2.0-flash',
+                contents=content_parts,
                 config=types.GenerateContentConfig(
-                    tools=[search_tool],
-                    system_instruction=f"{identity_context}\n\nYou are Freebot. Use the <user_facts> to address the user correctly."
+                    system_instruction=system_prompt,
+                    tools=[types.Tool(google_search=types.GoogleSearch())]
                 )
             )
 
             await message.reply(response.text)
         except Exception as e:
-            print(f"❌ ERROR: {e}")
+            print(f"❌ Error: {e}")
             await message.reply(f"⚠️ Error: {e}")
 
 discord_client.run(DISCORD_TOKEN)
