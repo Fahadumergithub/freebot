@@ -1,22 +1,20 @@
 import os
 import discord
-import sqlite3
-import datetime
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
-# Import skills safely - if they fail, the bot stays up
-try:
-    from skills.google_drive import log_to_sheet
-except ImportError:
-    log_to_sheet = None
+# 1. Import Local Memory Skill
+from skills.memory import init_db, save_fact, get_memories
 
 load_dotenv()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
+# Initialize Gemini Client
 client_ai = genai.Client(api_key=GEMINI_KEY)
+
+# Initialize Discord Client
 intents = discord.Intents.default()
 intents.message_content = True
 discord_client = discord.Client(intents=intents)
@@ -28,33 +26,12 @@ def load_identity():
     except FileNotFoundError:
         return "You are Freebot, a professional assistant for Dr. Fahad Umer."
 
-def init_db():
-    conn = sqlite3.connect('freebot_memory.db')
-    c = conn.cursor()
-    c.execute('CREATE TABLE IF NOT EXISTS memories (user_id TEXT, fact TEXT, timestamp DATETIME)')
-    conn.commit()
-    conn.close()
-
-def save_fact(user_id, fact):
-    conn = sqlite3.connect('freebot_memory.db')
-    c = conn.cursor()
-    c.execute('INSERT INTO memories VALUES (?, ?, ?)', (str(user_id), fact, datetime.datetime.now()))
-    conn.commit()
-    conn.close()
-
-def get_memories(user_id):
-    conn = sqlite3.connect('freebot_memory.db')
-    c = conn.cursor()
-    c.execute('SELECT fact FROM memories WHERE user_id = ? ORDER BY timestamp DESC LIMIT 15', (str(user_id),))
-    facts = [row[0] for row in c.fetchall()]
-    conn.close()
-    return facts
-
+# Ensure Database is ready
 init_db()
 
 @discord_client.event
 async def on_ready():
-    print(f'✅ Stable Multimodal Agent Online: {discord_client.user}')
+    print(f'✅ Freebot Stable (Lite + Search) Online: {discord_client.user}')
 
 @discord_client.event
 async def on_message(message):
@@ -63,7 +40,7 @@ async def on_message(message):
     msg_text = message.content.strip()
     user_id = str(message.author.id)
 
-    # 1. Traditional Commands (Working Backup)
+    # --- MANUAL MEMORY COMMANDS ---
     if msg_text.lower().startswith("remember "):
         fact = msg_text[9:].strip()
         save_fact(user_id, fact)
@@ -71,41 +48,49 @@ async def on_message(message):
 
     if msg_text.lower() == "check brain":
         facts = get_memories(user_id)
-        return await message.reply("**Memory:**\n" + "\n".join([f"• {f}" for f in facts]) if facts else "Memory empty.")
+        return await message.reply("**Current Stored Memory:**\n" + "\n".join([f"• {f}" for f in facts]) if facts else "Memory is currently empty.")
 
+    # --- AI RESPONSE LOGIC ---
     async with message.channel.typing():
         try:
-            # 2. Process Content (Multimodal)
-            content_parts = [msg_text] if msg_text else ["Analyze attached media."]
+            # 1. Gather Identity & Stored Facts
+            identity = load_identity()
+            memories = "\n".join(get_memories(user_id))
+            
+            # 2. Build System Instruction
+            system_instruction = f"{identity}\n\nUSER FACTS FROM DATABASE:\n{memories}"
+            
+            # 3. Prepare Content (Text + Attachments)
+            content_parts = [msg_text] if msg_text else ["Hello!"]
             for attachment in message.attachments:
                 file_path = f"temp_{attachment.filename}"
                 await attachment.save(file_path)
                 with open(file_path, "rb") as f:
-                    content_parts.append(types.Part.from_bytes(data=f.read(), mime_type=attachment.content_type))
+                    content_parts.append(types.Part.from_bytes(
+                        data=f.read(), 
+                        mime_type=attachment.content_type
+                    ))
                 os.remove(file_path)
 
-            # 3. Contextual Prompting
-            identity = load_identity()
-            memories = "\n".join(get_memories(user_id))
-            system_prompt = f"{identity}\n\nUSER FACTS:\n{memories}\n\nRespond professionally. Use tools for logging if requested."
-
-            # 4. Gemini 2.0 Flash Execution
-            active_tools = [types.Tool(google_search=types.GoogleSearch())]
-            if log_to_sheet:
-                active_tools.append(log_to_sheet)
-
+            # 4. Generate Response with Search Grounding
+            # (Simplified call to avoid tool-conflict 400 errors)
             response = client_ai.models.generate_content(
-                model='gemini-2.0-flash',
+                model='gemini-2.5-flash-lite',
                 contents=content_parts,
                 config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    tools=active_tools
+                    system_instruction=system_instruction,
+                    tools=[types.Tool(google_search=types.GoogleSearch())]
                 )
             )
 
-            await message.reply(response.text)
+            full_response = response.text if response.text else "I have processed your request."
+            
+            # 5. Split for Discord 2000 char limit
+            for i in range(0, len(full_response), 2000):
+                await message.reply(full_response[i:i+2000])
+
         except Exception as e:
-            print(f"❌ Error: {e}")
-            await message.reply(f"⚠️ Service Alert: {e}")
+            print(f"❌ API Error: {e}")
+            await message.reply(f"⚠️ Service interruption. Please try again. ({str(e)[:50]})")
 
 discord_client.run(DISCORD_TOKEN)

@@ -4,3 +4,5 @@ temp_*
 venv/
 __pycache__/
 *.log
+service_account.json
+service_account.json
